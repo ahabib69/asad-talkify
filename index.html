@@ -3,53 +3,155 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+
 <title>Asad's Talkify — Audio Visualizer Video Maker</title>
-<meta name="description" content="Turn any MP3 and image into an animated audio-visualizer video, right in your browser.">
+
+<meta
+  name="description"
+  content="Turn any MP3 and image into an animated audio-visualizer video, right in your browser."
+>
+
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="style.css">
 </head>
+
 <body>
+
 <div class="wrap">
+
   <h1>🎤 Asad's Talkify</h1>
-  <p class="sub">Upload an MP3 and an image — get a video with an animated audio visualizer.</p>
+
+  <p class="sub">
+    Upload an MP3 and an image — create a beautiful animated audio visualizer video.
+  </p>
 
   <div class="card">
+
     <div class="row">
+
       <label class="upload" id="audioLabel">
         <span class="upload-text">🎵 Choose MP3</span>
-        <input type="file" id="audioInput" accept="audio/*">
+        <input
+          type="file"
+          id="audioInput"
+          accept="audio/*"
+        >
       </label>
+
       <label class="upload" id="imageLabel">
         <span class="upload-text">🖼️ Choose Image</span>
-        <input type="file" id="imageInput" accept="image/*">
+        <input
+          type="file"
+          id="imageInput"
+          accept="image/*"
+        >
       </label>
+
     </div>
+
     <div class="row" style="margin-top:12px;">
+
       <select id="styleSelect">
-        <option value="bars">Bars</option>
-        <option value="circle">Circle pulse</option>
-        <option value="wave">Waveform</option>
-        <option value="rickshaw">Rickshaw Art 🎨</option>
+
+        <optgroup label="Classic">
+          <option value="bars">📊 Spectrum Bars</option>
+          <option value="wave">🌊 Waveform</option>
+          <option value="circle">⭕ Circle Pulse</option>
+          <option value="mirror">🪞 Mirror Spectrum</option>
+        </optgroup>
+
+        <optgroup label="Neon">
+          <option value="neon">💜 Neon Spectrum</option>
+          <option value="radial">💫 Radial Glow</option>
+          <option value="dots">✨ Neon Dots</option>
+          <option value="orbit">🪐 Orbit</option>
+        </optgroup>
+
+        <optgroup label="Animated">
+          <option value="particles">🌌 Particles</option>
+          <option value="aurora">🌈 Aurora Wave</option>
+          <option value="flame">🔥 Flame Spectrum</option>
+        </optgroup>
+
+        <optgroup label="Special">
+          <option value="rickshaw">🎨 Rickshaw Art</option>
+          <option value="glass">💎 Glass Spectrum</option>
+        </optgroup>
+
       </select>
-      <input type="text" id="titleInput" placeholder="Optional title / lyrics line" maxlength="60">
+
+      <input
+        type="text"
+        id="titleInput"
+        placeholder="Optional title / lyrics line"
+        maxlength="60"
+      >
+
     </div>
+
   </div>
+
 
   <div class="card">
-    <canvas id="canvas" width="1280" height="720"></canvas>
+
+    <canvas
+      id="canvas"
+      width="1280"
+      height="720"
+    ></canvas>
+
     <div class="controls">
-      <button id="previewBtn" disabled>▶ Preview</button>
-      <button id="recordBtn" class="secondary" disabled>⏺ Create Video</button>
+
+      <button
+        id="previewBtn"
+        disabled
+      >
+        ▶ Preview
+      </button>
+
+      <button
+        id="recordBtn"
+        class="secondary"
+        disabled
+      >
+        ⏺ Create Video
+      </button>
+
     </div>
-    <div class="progress"><div class="progress-bar" id="progressBar"></div></div>
-    <div class="status" id="status">Choose an MP3 and an image to begin.</div>
+
+    <div class="progress">
+      <div
+        class="progress-bar"
+        id="progressBar"
+      ></div>
+    </div>
+
+    <div
+      class="status"
+      id="status"
+    >
+      Choose an MP3 and an image to begin.
+    </div>
+
     <div id="downloadArea"></div>
+
   </div>
 
-  <p class="footer">Made by Asad · Talkify</p>
+
+  <p class="footer">
+    Made by Asad · Talkify
+  </p>
+
 </div>
 
-<audio id="audioEl" style="display:none" playsinline></audio>
+
+<audio
+  id="audioEl"
+  style="display:none"
+  playsinline
+></audio>
+
 <script src="script.js"></script>
+
 </body>
 </html>
