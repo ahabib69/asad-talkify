@@ -4,3179 +4,893 @@
   // =========================================================
   // ELEMENTS
   // =========================================================
+  const $ = id => document.getElementById(id);
 
-  const audioInput = document.getElementById('audioInput');
-  const imageInput = document.getElementById('imageInput');
-
-  const audioLabel = document.getElementById('audioLabel');
-  const imageLabel = document.getElementById('imageLabel');
-
-  const canvas = document.getElementById('canvas');
-  const ctx = canvas.getContext('2d');
-
-  const audioEl = document.getElementById('audioEl');
-
-  const previewBtn = document.getElementById('previewBtn');
-  const recordBtn = document.getElementById('recordBtn');
-
-  const progressBar = document.getElementById('progressBar');
-  const status = document.getElementById('status');
-
-  const styleSelect = document.getElementById('styleSelect');
-  const titleInput = document.getElementById('titleInput');
-
-  const downloadArea = document.getElementById('downloadArea');
-
+  const audioInput = $('audioInput');
+  const imageInput = $('imageInput');
+  const audioLabel = $('audioLabel');
+  const imageLabel = $('imageLabel');
+  const previewCanvas = $('canvas');
+  const audioEl = $('audioEl');
+  const previewBtn = $('previewBtn');
+  const recordBtn = $('recordBtn');
+  const progressBar = $('progressBar');
+  const status = $('status');
+  const styleSelect = $('styleSelect');
+  const titleInput = $('titleInput');
+  const downloadArea = $('downloadArea');
 
   // =========================================================
   // STATE
   // =========================================================
-
   let img = null;
+  let imgVer = 0;
   let audioFile = null;
   let audioReady = false;
 
   let audioCtx = null;
   let analyser = null;
-  let srcNode = null;
-
   let freqLive = null;
   let timeLive = null;
-
   let rafId = null;
+  let bassSmooth = 0;
+  let exporting = false;
 
+  const MEDIABUNNY_CDN = 'https://cdn.jsdelivr.net/npm/mediabunny@1.59.0/+esm';
+  const canExport = !!(window.VideoEncoder && window.AudioEncoder);
 
-  // =========================================================
-  // CONSTANTS
-  // =========================================================
-
-  const MEDIABUNNY_CDN =
-    'https://cdn.jsdelivr.net/npm/mediabunny@1.59.0/+esm';
-
-  const canExport =
-    !!(window.VideoEncoder && window.AudioEncoder);
-
-
-  const RICKSHAW = [
-    '#ec4899',
-    '#fbbf24',
-    '#22c55e',
-    '#f97316',
-    '#3b82f6',
-    '#ef4444',
-    '#a855f7',
-    '#06b6d4'
-  ];
-
-
-  const NEON_COLORS = [
-    '#22d3ee',
-    '#38bdf8',
-    '#818cf8',
-    '#a78bfa',
-    '#e879f9',
-    '#f472b6'
-  ];
-
+  const RICKSHAW = ['#ec4899', '#fbbf24', '#22c55e', '#f97316', '#3b82f6', '#ef4444', '#a855f7', '#06b6d4'];
+  const NEON = ['#22d3ee', '#38bdf8', '#818cf8', '#a78bfa', '#e879f9', '#f472b6'];
+  const TAU = Math.PI * 2;
 
   let mediabunnyPromise = null;
-
-
   function loadMediabunny() {
-    if (!mediabunnyPromise) {
-      mediabunnyPromise = import(MEDIABUNNY_CDN);
-    }
-
+    if (!mediabunnyPromise) mediabunnyPromise = import(MEDIABUNNY_CDN);
     return mediabunnyPromise;
   }
 
+  // =========================================================
+  // DRAW SURFACE (preview canvas or offscreen export canvas)
+  // =========================================================
+  let canvas, ctx, W, H, S, cache;
+
+  function useSurface(c, opts) {
+    canvas = c;
+    ctx = c.getContext('2d', opts || undefined);
+    W = c.width;
+    H = c.height;
+    S = H / 720; // scale for fixed-pixel sizes so 720p and 1080p look the same
+    cache = { grads: {}, bg: null, bgVer: -1, title: null };
+  }
+  useSurface(previewCanvas);
+
+  const scratch = {};
+
+  function grad(key, x0, y0, x1, y1, stops) {
+    let g = cache.grads[key];
+    if (!g) {
+      g = ctx.createLinearGradient(x0, y0, x1, y1);
+      for (let i = 0; i < stops.length; i++) g.addColorStop(stops[i][0], stops[i][1]);
+      cache.grads[key] = g;
+    }
+    return g;
+  }
+
+  function vals(freq, count) {
+    const a = scratch['v' + count] || (scratch['v' + count] = new Float32Array(count));
+    const n = freq.length;
+    for (let i = 0; i < count; i++) a[i] = freq[(i / count * n) | 0] / 255;
+    return a;
+  }
+
+  function rr(x, y, w, h, r) {
+    if (ctx.roundRect) ctx.roundRect(x, y, w, h, r);
+    else ctx.rect(x, y, w, h);
+  }
 
   // =========================================================
   // STATUS / READY
   // =========================================================
-
-  function setStatus(text) {
-    status.textContent = text;
-  }
-
+  function setStatus(t) { status.textContent = t; }
 
   function checkReady() {
-
-    const ready =
-      !!img &&
-      audioReady;
-
+    const ready = !!img && audioReady;
     previewBtn.disabled = !ready;
-
-    recordBtn.disabled =
-      !ready ||
-      !canExport;
-
-    if (ready && canExport) {
-      setStatus(
-        'Ready. Choose a style, preview it, then create the video.'
-      );
-    }
-
+    recordBtn.disabled = !ready || !canExport;
+    if (ready && canExport) setStatus('Ready. Choose a style, preview it, then create the video.');
   }
 
+  if (!canExport) setStatus('Video export needs Chrome or Edge (WebCodecs not available here).');
 
-  if (!canExport) {
+  const ZERO_F = new Uint8Array(128);
+  const ZERO_T = new Uint8Array(128).fill(128);
 
-    setStatus(
-      'Video export needs Chrome or Edge (WebCodecs not available here).'
-    );
-
+  function paintIdle() {
+    if (exporting || !img) return;
+    if (canvas !== previewCanvas) useSurface(previewCanvas);
+    paintCanvas(ZERO_F, ZERO_T, 0, styleSelect.value, titleInput.value.trim());
   }
-
 
   // =========================================================
   // IMAGE UPLOAD
   // =========================================================
-
   imageInput.addEventListener('change', function (e) {
-
     const file = e.target.files[0];
-
-    if (!file) {
-      return;
-    }
-
+    if (!file) return;
     const url = URL.createObjectURL(file);
-
-    const newImage = new Image();
-
-    newImage.onload = function () {
-
-      img = newImage;
-
+    const im = new Image();
+    im.onload = function () {
+      img = im;
+      imgVer++;
       imageLabel.classList.add('filled');
-
-      const uploadText =
-        imageLabel.querySelector('.upload-text');
-
-      if (uploadText) {
-        uploadText.textContent =
-          '🖼️ ' + file.name;
-      }
-
+      const t = imageLabel.querySelector('.upload-text');
+      if (t) t.textContent = '🖼️ ' + file.name;
       checkReady();
-
-      paintCanvas(
-        new Uint8Array(128),
-        new Uint8Array(128),
-        0,
-        styleSelect.value,
-        titleInput.value.trim()
-      );
-
+      paintIdle();
       URL.revokeObjectURL(url);
-
     };
-
-    newImage.onerror = function () {
-
+    im.onerror = function () {
       URL.revokeObjectURL(url);
-
-      setStatus(
-        'Could not load this image. Please choose another image.'
-      );
-
+      setStatus('Could not load this image. Please choose another image.');
     };
-
-    newImage.src = url;
-
+    im.src = url;
   });
-
 
   // =========================================================
   // AUDIO UPLOAD
   // =========================================================
-
   audioInput.addEventListener('change', function (e) {
-
     const file = e.target.files[0];
-
-    if (!file) {
-      return;
-    }
-
+    if (!file) return;
     audioFile = file;
-
     audioReady = false;
-
-    const url = URL.createObjectURL(file);
-
-    audioEl.src = url;
-
+    audioEl.src = URL.createObjectURL(file);
     audioEl.load();
-
     audioEl.oncanplaythrough = function () {
-
       audioReady = true;
-
       audioLabel.classList.add('filled');
-
-      const uploadText =
-        audioLabel.querySelector('.upload-text');
-
-      if (uploadText) {
-        uploadText.textContent =
-          '🎵 ' + file.name;
-      }
-
+      const t = audioLabel.querySelector('.upload-text');
+      if (t) t.textContent = '🎵 ' + file.name;
       checkReady();
-
     };
-
     audioEl.onerror = function () {
-
       audioReady = false;
-
-      setStatus(
-        'Could not load this audio file. Please choose another file.'
-      );
-
+      setStatus('Could not load this audio file. Please choose another file.');
       checkReady();
-
     };
-
   });
 
-
   // =========================================================
-  // BACKGROUND
+  // BACKGROUND (baked once, then just scaled per frame)
   // =========================================================
-
-  function drawBackground(bass) {
-
-    const w = canvas.width;
-    const h = canvas.height;
+  function buildBg() {
+    const l = document.createElement('canvas');
+    l.width = W;
+    l.height = H;
+    const c = l.getContext('2d');
+    c.fillStyle = '#050505';
+    c.fillRect(0, 0, W, H);
 
     if (img) {
+      c.imageSmoothingEnabled = true;
+      c.imageSmoothingQuality = 'high';
+      const ir = img.width / img.height;
+      const cr = W / H;
+      let dw, dh;
+      if (ir > cr) { dh = H; dw = dh * ir; } else { dw = W; dh = dw / ir; }
+      c.drawImage(img, (W - dw) / 2, (H - dh) / 2, dw, dh);
 
-      const scale =
-        1 + (bass || 0) * 0.06;
+      c.fillStyle = 'rgba(0,0,0,0.38)';
+      c.fillRect(0, 0, W, H);
 
-      const imageRatio =
-        img.width / img.height;
-
-      const canvasRatio =
-        w / h;
-
-      let dw;
-      let dh;
-
-      if (imageRatio > canvasRatio) {
-
-        dh = h * scale;
-        dw = dh * imageRatio;
-
-      } else {
-
-        dw = w * scale;
-        dh = dw / imageRatio;
-
-      }
-
-      const dx =
-        (w - dw) / 2;
-
-      const dy =
-        (h - dh) / 2;
-
-      ctx.drawImage(
-        img,
-        dx,
-        dy,
-        dw,
-        dh
-      );
-
-      // Dark cinematic overlay
-      ctx.fillStyle =
-        'rgba(0,0,0,0.38)';
-
-      ctx.fillRect(
-        0,
-        0,
-        w,
-        h
-      );
-
-      // Soft bottom gradient
-      const gradient =
-        ctx.createLinearGradient(
-          0,
-          0,
-          0,
-          h
-        );
-
-      gradient.addColorStop(
-        0,
-        'rgba(0,0,0,0.08)'
-      );
-
-      gradient.addColorStop(
-        0.55,
-        'rgba(0,0,0,0.05)'
-      );
-
-      gradient.addColorStop(
-        1,
-        'rgba(0,0,0,0.55)'
-      );
-
-      ctx.fillStyle = gradient;
-
-      ctx.fillRect(
-        0,
-        0,
-        w,
-        h
-      );
-
-    } else {
-
-      ctx.fillStyle = '#050505';
-
-      ctx.fillRect(
-        0,
-        0,
-        w,
-        h
-      );
-
+      const g = c.createLinearGradient(0, 0, 0, H);
+      g.addColorStop(0, 'rgba(0,0,0,0.08)');
+      g.addColorStop(0.55, 'rgba(0,0,0,0.05)');
+      g.addColorStop(1, 'rgba(0,0,0,0.55)');
+      c.fillStyle = g;
+      c.fillRect(0, 0, W, H);
     }
-
+    cache.bg = l;
+    cache.bgVer = imgVer;
   }
 
+  function drawBackground(bass) {
+    if (cache.bgVer !== imgVer || !cache.bg) buildBg();
+    const s = 1 + (bass || 0) * 0.06;
+    if (s < 1.001) {
+      ctx.drawImage(cache.bg, 0, 0);
+    } else {
+      ctx.drawImage(cache.bg, (W - W * s) / 2, (H - H * s) / 2, W * s, H * s);
+    }
+  }
 
   // =========================================================
-  // TITLE
+  // TITLE (baked once)
   // =========================================================
-
   function drawTitle(text) {
-
-    if (!text) {
-      return;
+    if (!text) return;
+    const key = text + '|' + W;
+    if (!cache.title || cache.title.key !== key) {
+      const fs = Math.round(34 * S);
+      const font = 'bold ' + fs + 'px "Hind Siliguri","Noto Sans Bengali",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif';
+      const m = document.createElement('canvas').getContext('2d');
+      m.font = font;
+      const tw = m.measureText(text).width;
+      const bw = Math.min(W - 20 * S, tw + 52 * S);
+      const bh = 54 * S;
+      const pad = 18 * S;
+      const l = document.createElement('canvas');
+      l.width = Math.ceil(bw + pad * 2);
+      l.height = Math.ceil(bh + pad * 2);
+      const c = l.getContext('2d');
+      c.fillStyle = 'rgba(0,0,0,0.58)';
+      c.beginPath();
+      if (c.roundRect) c.roundRect(pad, pad, bw, bh, 27 * S); else c.rect(pad, pad, bw, bh);
+      c.fill();
+      c.font = font;
+      c.textAlign = 'center';
+      c.textBaseline = 'middle';
+      c.shadowBlur = 12 * S;
+      c.shadowColor = 'rgba(255,255,255,0.25)';
+      c.fillStyle = '#fff';
+      c.fillText(text, l.width / 2, pad + bh / 2, bw - 20 * S);
+      cache.title = { key, layer: l, pad };
     }
-
-    const w = canvas.width;
-    const h = canvas.height;
-
-    ctx.save();
-
-    ctx.font =
-      'bold 34px -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif';
-
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-
-    const textWidth =
-      ctx.measureText(text).width;
-
-    const boxWidth =
-      textWidth + 52;
-
-    const boxHeight =
-      54;
-
-    const boxX =
-      w / 2 - boxWidth / 2;
-
-    const boxY =
-      h - 88;
-
-    ctx.fillStyle =
-      'rgba(0,0,0,0.58)';
-
-    ctx.beginPath();
-
-    if (ctx.roundRect) {
-
-      ctx.roundRect(
-        boxX,
-        boxY,
-        boxWidth,
-        boxHeight,
-        27
-      );
-
-    } else {
-
-      ctx.rect(
-        boxX,
-        boxY,
-        boxWidth,
-        boxHeight
-      );
-
-    }
-
-    ctx.fill();
-
-    ctx.shadowBlur = 12;
-
-    ctx.shadowColor =
-      'rgba(255,255,255,0.25)';
-
-    ctx.fillStyle =
-      '#ffffff';
-
-    ctx.fillText(
-      text,
-      w / 2,
-      boxY + boxHeight / 2
-    );
-
-    ctx.restore();
-
+    const t = cache.title;
+    ctx.drawImage(t.layer, (W - t.layer.width) / 2, H - 88 * S - t.pad);
   }
 
-
   // =========================================================
-  // RICKSHAW BORDER
+  // SHARED HELPERS (batched strokes, glow without shadowBlur)
   // =========================================================
-
-  function drawRickshawBorder() {
-
-    const w = canvas.width;
-    const h = canvas.height;
-
-    const r = 12;
-    const step = r * 2;
-
-    for (
-      let x = 0, i = 0;
-      x < w;
-      x += step, i++
-    ) {
-
-      ctx.fillStyle =
-        RICKSHAW[i % RICKSHAW.length];
-
+  function drawRays(v, count, baseR, maxLen, hue0, span, lw) {
+    const cx = W / 2, cy = H / 2, B = 8, per = count / B;
+    ctx.lineCap = 'round';
+    for (let b = 0; b < B; b++) {
+      const h = hue0 + (b + 0.5) / B * span;
       ctx.beginPath();
-
-      ctx.arc(
-        x + r,
-        h - r,
-        r,
-        Math.PI,
-        0
-      );
-
-      ctx.fill();
-
-    }
-
-  }
-
-
-  // =========================================================
-  // GLOW LINE HELPER
-  // =========================================================
-
-  function drawGlowLine(
-    x1,
-    y1,
-    x2,
-    y2,
-    color,
-    width,
-    glow
-  ) {
-
-    ctx.save();
-
-    ctx.strokeStyle = color;
-    ctx.lineWidth = width;
-
-    ctx.shadowBlur = glow;
-    ctx.shadowColor = color;
-
-    ctx.beginPath();
-
-    ctx.moveTo(x1, y1);
-    ctx.lineTo(x2, y2);
-
-    ctx.stroke();
-
-    ctx.restore();
-
-  }
-
-
-  // =========================================================
-  // BARS
-  // =========================================================
-
-  function drawBars(freqBytes, bass) {
-
-    const w = canvas.width;
-    const h = canvas.height;
-
-    const count = 64;
-
-    const gap = 5;
-
-    const barWidth =
-      (w - gap * (count - 1)) / count;
-
-    for (let i = 0; i < count; i++) {
-
-      const index =
-        Math.floor(
-          i / count * freqBytes.length
-        );
-
-      const value =
-        freqBytes[index] / 255;
-
-      const barHeight =
-        Math.max(
-          4,
-          value * h * 0.52 *
-          (1 + bass * 0.35)
-        );
-
-      const x =
-        i * (barWidth + gap);
-
-      const y =
-        h - barHeight - 24;
-
-      const gradient =
-        ctx.createLinearGradient(
-          0,
-          y,
-          0,
-          h
-        );
-
-      gradient.addColorStop(
-        0,
-        '#22d3ee'
-      );
-
-      gradient.addColorStop(
-        0.5,
-        '#818cf8'
-      );
-
-      gradient.addColorStop(
-        1,
-        '#f472b6'
-      );
-
-      ctx.fillStyle = gradient;
-
-      ctx.fillRect(
-        x,
-        y,
-        barWidth,
-        barHeight
-      );
-
-    }
-
-  }
-
-
-  // =========================================================
-  // WAVE
-  // =========================================================
-
-  function drawWave(timeBytes, bass) {
-
-    const w = canvas.width;
-    const h = canvas.height;
-
-    const centerY =
-      h * 0.53;
-
-    ctx.save();
-
-    ctx.lineWidth = 5;
-
-    ctx.strokeStyle =
-      '#67e8f9';
-
-    ctx.shadowBlur = 20;
-
-    ctx.shadowColor =
-      '#22d3ee';
-
-    ctx.beginPath();
-
-    const slice =
-      w / (timeBytes.length - 1);
-
-    for (
-      let i = 0;
-      i < timeBytes.length;
-      i++
-    ) {
-
-      const normalized =
-        (timeBytes[i] - 128) / 128;
-
-      const y =
-        centerY +
-        normalized *
-        h *
-        0.28 *
-        (1 + bass * 0.25);
-
-      const x =
-        i * slice;
-
-      if (i === 0) {
-        ctx.moveTo(x, y);
-      } else {
-        ctx.lineTo(x, y);
+      const from = Math.floor(b * per), to = Math.floor((b + 1) * per);
+      for (let i = from; i < to; i++) {
+        const a = i / count * TAU;
+        const c = Math.cos(a), s = Math.sin(a);
+        const r2 = baseR + v[i] * maxLen;
+        ctx.moveTo(cx + c * baseR, cy + s * baseR);
+        ctx.lineTo(cx + c * r2, cy + s * r2);
       }
-
-    }
-
-    ctx.stroke();
-
-    ctx.restore();
-
-  }
-
-
-  // =========================================================
-  // CIRCLE
-  // =========================================================
-
-  function drawCircle(freqBytes, bass) {
-
-    const w = canvas.width;
-    const h = canvas.height;
-
-    const cx = w / 2;
-    const cy = h / 2;
-
-    const baseR =
-      Math.min(w, h) *
-      0.17 *
-      (1 + bass * 0.2);
-
-    const count =
-      freqBytes.length;
-
-    ctx.save();
-
-    for (
-      let i = 0;
-      i < count;
-      i++
-    ) {
-
-      const value =
-        freqBytes[i] / 255;
-
-      const angle =
-        (i / count) *
-        Math.PI * 2;
-
-      const inner =
-        baseR;
-
-      const outer =
-        inner +
-        value *
-        Math.min(w, h) *
-        0.30;
-
-      const x1 =
-        cx + Math.cos(angle) * inner;
-
-      const y1 =
-        cy + Math.sin(angle) * inner;
-
-      const x2 =
-        cx + Math.cos(angle) * outer;
-
-      const y2 =
-        cy + Math.sin(angle) * outer;
-
-      const hue =
-        190 + (i / count) * 160;
-
-      const color =
-        `hsl(${hue},90%,65%)`;
-
-      drawGlowLine(
-        x1,
-        y1,
-        x2,
-        y2,
-        color,
-        4,
-        14
-      );
-
-    }
-
-    ctx.beginPath();
-
-    ctx.arc(
-      cx,
-      cy,
-      baseR,
-      0,
-      Math.PI * 2
-    );
-
-    ctx.strokeStyle =
-      'rgba(255,255,255,0.8)';
-
-    ctx.lineWidth = 2;
-
-    ctx.shadowBlur = 15;
-
-    ctx.shadowColor =
-      '#ffffff';
-
-    ctx.stroke();
-
-    ctx.restore();
-
-  }
-
-
-  // =========================================================
-  // MIRROR SPECTRUM
-  // =========================================================
-
-  function drawMirror(freqBytes, bass) {
-
-    const w = canvas.width;
-    const h = canvas.height;
-
-    const center =
-      h * 0.57;
-
-    const count = 64;
-
-    const gap = 4;
-
-    const barWidth =
-      (w - gap * (count - 1)) / count;
-
-    for (
-      let i = 0;
-      i < count;
-      i++
-    ) {
-
-      const index =
-        Math.floor(
-          i / count * freqBytes.length
-        );
-
-      const value =
-        freqBytes[index] / 255;
-
-      const barHeight =
-        Math.max(
-          3,
-          value *
-          h *
-          0.32 *
-          (1 + bass * 0.25)
-        );
-
-      const x =
-        i * (barWidth + gap);
-
-      const gradient =
-        ctx.createLinearGradient(
-          0,
-          center - barHeight,
-          0,
-          center + barHeight
-        );
-
-      gradient.addColorStop(
-        0,
-        '#a78bfa'
-      );
-
-      gradient.addColorStop(
-        0.5,
-        '#22d3ee'
-      );
-
-      gradient.addColorStop(
-        1,
-        '#f472b6'
-      );
-
-      ctx.fillStyle = gradient;
-
-      ctx.fillRect(
-        x,
-        center - barHeight,
-        barWidth,
-        barHeight
-      );
-
-      ctx.globalAlpha = 0.72;
-
-      ctx.fillRect(
-        x,
-        center,
-        barWidth,
-        barHeight
-      );
-
-      ctx.globalAlpha = 1;
-
-    }
-
-  }
-
-
-  // =========================================================
-  // NEON
-  // =========================================================
-
-  function drawNeon(freqBytes, bass) {
-
-    const w = canvas.width;
-    const h = canvas.height;
-
-    const count = 72;
-
-    const gap = 3;
-
-    const barWidth =
-      (w - gap * (count - 1)) / count;
-
-    for (
-      let i = 0;
-      i < count;
-      i++
-    ) {
-
-      const index =
-        Math.floor(
-          i / count *
-          freqBytes.length
-        );
-
-      const value =
-        freqBytes[index] / 255;
-
-      const barHeight =
-        8 +
-        value *
-        h *
-        0.52 *
-        (1 + bass * 0.4);
-
-      const x =
-        i * (barWidth + gap);
-
-      const y =
-        h - barHeight - 20;
-
-      const color =
-        NEON_COLORS[
-          i % NEON_COLORS.length
-        ];
-
-      ctx.save();
-
-      ctx.fillStyle =
-        color;
-
-      ctx.shadowBlur = 22;
-
-      ctx.shadowColor =
-        color;
-
-      ctx.beginPath();
-
-      if (ctx.roundRect) {
-
-        ctx.roundRect(
-          x,
-          y,
-          barWidth,
-          barHeight,
-          barWidth / 2
-        );
-
-      } else {
-
-        ctx.fillRect(
-          x,
-          y,
-          barWidth,
-          barHeight
-        );
-
-      }
-
-      ctx.fill();
-
-      ctx.restore();
-
-    }
-
-  }
-
-
-  // =========================================================
-  // RADIAL GLOW
-  // =========================================================
-
-  function drawRadial(freqBytes, bass) {
-
-    const w = canvas.width;
-    const h = canvas.height;
-
-    const cx = w / 2;
-    const cy = h / 2;
-
-    const baseR =
-      Math.min(w, h) *
-      0.12;
-
-    const count = 96;
-
-    ctx.save();
-
-    for (
-      let i = 0;
-      i < count;
-      i++
-    ) {
-
-      const value =
-        freqBytes[
-          Math.floor(
-            i / count *
-            freqBytes.length
-          )
-        ] / 255;
-
-      const angle =
-        i / count *
-        Math.PI * 2;
-
-      const r1 =
-        baseR;
-
-      const r2 =
-        baseR +
-        value *
-        Math.min(w, h) *
-        0.38 *
-        (1 + bass * 0.25);
-
-      const x1 =
-        cx +
-        Math.cos(angle) *
-        r1;
-
-      const y1 =
-        cy +
-        Math.sin(angle) *
-        r1;
-
-      const x2 =
-        cx +
-        Math.cos(angle) *
-        r2;
-
-      const y2 =
-        cy +
-        Math.sin(angle) *
-        r2;
-
-      const hue =
-        (i * 3 + 190) % 360;
-
-      const color =
-        `hsl(${hue},100%,65%)`;
-
-      drawGlowLine(
-        x1,
-        y1,
-        x2,
-        y2,
-        color,
-        3,
-        18
-      );
-
-    }
-
-    ctx.restore();
-
-  }
-
-
-  // =========================================================
-  // DOTS
-  // =========================================================
-
-  function drawDots(freqBytes, bass) {
-
-    const w = canvas.width;
-    const h = canvas.height;
-
-    const count = 100;
-
-    for (
-      let i = 0;
-      i < count;
-      i++
-    ) {
-
-      const index =
-        Math.floor(
-          i / count *
-          freqBytes.length
-        );
-
-      const value =
-        freqBytes[index] / 255;
-
-      const x =
-        (i / count) *
-        w;
-
-      const yBase =
-        h * 0.72;
-
-      const y =
-        yBase -
-        value *
-        h *
-        0.48;
-
-      const radius =
-        3 +
-        value *
-        10 +
-        bass *
-        3;
-
-      const hue =
-        190 +
-        (i / count) *
-        150;
-
-      const color =
-        `hsl(${hue},95%,65%)`;
-
-      ctx.save();
-
-      ctx.fillStyle =
-        color;
-
-      ctx.shadowBlur =
-        18;
-
-      ctx.shadowColor =
-        color;
-
-      ctx.beginPath();
-
-      ctx.arc(
-        x,
-        y,
-        radius,
-        0,
-        Math.PI * 2
-      );
-
-      ctx.fill();
-
-      ctx.restore();
-
-    }
-
-  }
-
-
-  // =========================================================
-  // ORBIT
-  // =========================================================
-
-  function drawOrbit(freqBytes, bass) {
-
-    const w = canvas.width;
-    const h = canvas.height;
-
-    const cx = w / 2;
-    const cy = h / 2;
-
-    const base =
-      Math.min(w, h) * 0.16;
-
-    const rings = 4;
-
-    ctx.save();
-
-    for (
-      let ring = 0;
-      ring < rings;
-      ring++
-    ) {
-
-      const radius =
-        base +
-        ring * 55 +
-        bass * 20;
-
-      ctx.beginPath();
-
-      ctx.arc(
-        cx,
-        cy,
-        radius,
-        0,
-        Math.PI * 2
-      );
-
-      ctx.strokeStyle =
-        `rgba(103,232,249,${0.18 + ring * 0.05})`;
-
-      ctx.lineWidth = 2;
-
+      ctx.strokeStyle = 'hsla(' + h + ',90%,65%,0.22)';
+      ctx.lineWidth = lw * 3.2;
       ctx.stroke();
-
+      ctx.strokeStyle = 'hsl(' + h + ',90%,68%)';
+      ctx.lineWidth = lw;
+      ctx.stroke();
     }
-
-
-    const count = 72;
-
-    for (
-      let i = 0;
-      i < count;
-      i++
-    ) {
-
-      const value =
-        freqBytes[
-          Math.floor(
-            i / count *
-            freqBytes.length
-          )
-        ] / 255;
-
-      const angle =
-        i / count *
-        Math.PI * 2;
-
-      const radius =
-        base +
-        value *
-        Math.min(w, h) *
-        0.30;
-
-      const x =
-        cx +
-        Math.cos(angle) *
-        radius;
-
-      const y =
-        cy +
-        Math.sin(angle) *
-        radius;
-
-      const size =
-        2 +
-        value * 8;
-
-      const hue =
-        180 +
-        i * 2.5;
-
-      const color =
-        `hsl(${hue % 360},95%,65%)`;
-
-      ctx.fillStyle =
-        color;
-
-      ctx.shadowBlur = 18;
-
-      ctx.shadowColor =
-        color;
-
-      ctx.beginPath();
-
-      ctx.arc(
-        x,
-        y,
-        size,
-        0,
-        Math.PI * 2
-      );
-
-      ctx.fill();
-
-    }
-
-    ctx.restore();
-
   }
 
-
-  // =========================================================
-  // PARTICLES
-  // =========================================================
-
-  function drawParticles(freqBytes, bass) {
-
-    const w = canvas.width;
-    const h = canvas.height;
-
-    const count = 150;
-
-    for (
-      let i = 0;
-      i < count;
-      i++
-    ) {
-
-      const waveIndex =
-        i % freqBytes.length;
-
-      const value =
-        freqBytes[waveIndex] / 255;
-
-      // Deterministic positions.
-      // Important for offline video export.
-      const px =
-        (
-          Math.sin(i * 12.9898) *
-          43758.5453
-        ) % 1;
-
-      const py =
-        (
-          Math.sin(i * 78.233) *
-          12345.6789
-        ) % 1;
-
-      const normalizedX =
-        Math.abs(px);
-
-      const normalizedY =
-        Math.abs(py);
-
-      const x =
-        normalizedX * w;
-
-      const baseY =
-        normalizedY * h;
-
-      const y =
-        baseY -
-        value *
-        h *
-        0.20;
-
-      const radius =
-        1.5 +
-        value * 5 +
-        bass * 2;
-
-      const hue =
-        185 +
-        (i * 2.3) % 150;
-
-      const color =
-        `hsla(${hue},100%,70%,${0.35 + value * 0.65})`;
-
-      ctx.save();
-
-      ctx.fillStyle =
-        color;
-
-      ctx.shadowBlur = 14;
-
-      ctx.shadowColor =
-        color;
-
-      ctx.beginPath();
-
-      ctx.arc(
-        x,
-        y,
-        radius,
-        0,
-        Math.PI * 2
-      );
-
-      ctx.fill();
-
-      ctx.restore();
-
-    }
-
-  }
-
-
-  // =========================================================
-  // AURORA
-  // =========================================================
-
-  function drawAurora(freqBytes, bass) {
-
-    const w = canvas.width;
-    const h = canvas.height;
-
-    ctx.save();
-
-    ctx.globalCompositeOperation =
-      'screen';
-
-    for (
-      let layer = 0;
-      layer < 5;
-      layer++
-    ) {
-
-      ctx.beginPath();
-
-      const amplitude =
-        h *
-        (0.07 + bass * 0.08) *
-        (1 + layer * 0.1);
-
-      for (
-        let x = 0;
-        x <= w;
-        x += 12
-      ) {
-
-        const index =
-          Math.floor(
-            x / w *
-            freqBytes.length
-          );
-
-        const value =
-          freqBytes[index] / 255;
-
-        const wave =
-          Math.sin(
-            x * 0.008 +
-            layer * 0.9
-          ) *
-          amplitude;
-
-        const audioWave =
-          value *
-          h *
-          0.18;
-
-        const y =
-          h * 0.58 +
-          wave -
-          audioWave -
-          layer * 25;
-
-        if (x === 0) {
-          ctx.moveTo(x, y);
-        } else {
-          ctx.lineTo(x, y);
-        }
-
-      }
-
-      ctx.lineTo(w, h);
-      ctx.lineTo(0, h);
-      ctx.closePath();
-
-      const gradient =
-        ctx.createLinearGradient(
-          0,
-          0,
-          w,
-          0
-        );
-
-      gradient.addColorStop(
-        0,
-        `hsla(${180 + layer * 25},90%,60%,0.12)`
-      );
-
-      gradient.addColorStop(
-        0.5,
-        `hsla(${230 + layer * 20},90%,65%,0.20)`
-      );
-
-      gradient.addColorStop(
-        1,
-        `hsla(${310 + layer * 10},90%,65%,0.12)`
-      );
-
-      ctx.fillStyle =
-        gradient;
-
-      ctx.fill();
-
-    }
-
-    ctx.restore();
-
-  }
-
-
-  // =========================================================
-  // FLAME
-  // =========================================================
-
-  function drawFlame(freqBytes, bass) {
-
-    const w = canvas.width;
-    const h = canvas.height;
-
-    const count = 70;
-
-    const gap = 3;
-
-    const barWidth =
-      (w - gap * (count - 1)) / count;
-
-    for (
-      let i = 0;
-      i < count;
-      i++
-    ) {
-
-      const value =
-        freqBytes[
-          Math.floor(
-            i / count *
-            freqBytes.length
-          )
-        ] / 255;
-
-      const height =
-        8 +
-        value *
-        h *
-        0.60 *
-        (1 + bass * 0.35);
-
-      const x =
-        i *
-        (barWidth + gap);
-
-      const y =
-        h -
-        height -
-        18;
-
-      const gradient =
-        ctx.createLinearGradient(
-          0,
-          y,
-          0,
-          h
-        );
-
-      gradient.addColorStop(
-        0,
-        '#fff7ed'
-      );
-
-      gradient.addColorStop(
-        0.18,
-        '#facc15'
-      );
-
-      gradient.addColorStop(
-        0.48,
-        '#fb923c'
-      );
-
-      gradient.addColorStop(
-        0.75,
-        '#ef4444'
-      );
-
-      gradient.addColorStop(
-        1,
-        '#7f1d1d'
-      );
-
-      ctx.save();
-
-      ctx.fillStyle =
-        gradient;
-
-      ctx.shadowBlur = 15;
-
-      ctx.shadowColor =
-        '#f97316';
-
-      ctx.fillRect(
-        x,
-        y,
-        barWidth,
-        height
-      );
-
-      ctx.restore();
-
-    }
-
-  }
-
-
-  // =========================================================
-  // GLASS SPECTRUM
-  // =========================================================
-
-  function drawGlass(freqBytes, bass) {
-
-    const w = canvas.width;
-    const h = canvas.height;
-
-    const count = 56;
-
-    const gap = 7;
-
-    const barWidth =
-      (w - gap * (count - 1)) / count;
-
-    for (
-      let i = 0;
-      i < count;
-      i++
-    ) {
-
-      const value =
-        freqBytes[
-          Math.floor(
-            i / count *
-            freqBytes.length
-          )
-        ] / 255;
-
-      const barHeight =
-        12 +
-        value *
-        h *
-        0.48 *
-        (1 + bass * 0.25);
-
-      const x =
-        i *
-        (barWidth + gap);
-
-      const y =
-        h -
-        barHeight -
-        25;
-
-      const gradient =
-        ctx.createLinearGradient(
-          0,
-          y,
-          0,
-          h
-        );
-
-      gradient.addColorStop(
-        0,
-        'rgba(255,255,255,0.85)'
-      );
-
-      gradient.addColorStop(
-        0.45,
-        'rgba(125,211,252,0.52)'
-      );
-
-      gradient.addColorStop(
-        1,
-        'rgba(244,114,182,0.20)'
-      );
-
-      ctx.save();
-
-      ctx.fillStyle =
-        gradient;
-
-      ctx.strokeStyle =
-        'rgba(255,255,255,0.45)';
-
-      ctx.lineWidth = 1.5;
-
-      if (ctx.roundRect) {
-
+  function paintDots(xs, ys, rs, count, hue0, span, B, alpha) {
+    const per = count / B;
+    for (let pass = 0; pass < 2; pass++) {
+      for (let b = 0; b < B; b++) {
+        const h = hue0 + (b + 0.5) / B * span;
+        ctx.fillStyle = 'hsla(' + h + ',95%,' + (pass ? 66 : 62) + '%,' + (pass ? alpha : 0.22) + ')';
         ctx.beginPath();
-
-        ctx.roundRect(
-          x,
-          y,
-          barWidth,
-          barHeight,
-          8
-        );
-
+        const from = Math.floor(b * per), to = Math.floor((b + 1) * per);
+        for (let i = from; i < to; i++) {
+          const r = pass ? rs[i] : rs[i] * 2.6;
+          ctx.moveTo(xs[i] + r, ys[i]);
+          ctx.arc(xs[i], ys[i], r, 0, TAU);
+        }
         ctx.fill();
-        ctx.stroke();
-
-      } else {
-
-        ctx.fillRect(
-          x,
-          y,
-          barWidth,
-          barHeight
-        );
-
       }
-
-      ctx.restore();
-
     }
-
   }
 
-
-  // =========================================================
-  // RICKSHAW
-  // =========================================================
-
-  function drawRickshaw(freqBytes, bass) {
-
-    const w = canvas.width;
-    const h = canvas.height;
-
-    const count = 64;
-
-    const gap = 4;
-
-    const barWidth =
-      (w - gap * (count - 1)) / count;
-
-    for (
-      let i = 0;
-      i < count;
-      i++
-    ) {
-
-      const value =
-        freqBytes[
-          Math.floor(
-            i / count *
-            freqBytes.length
-          )
-        ] / 255;
-
-      const height =
-        value *
-        h *
-        0.58 *
-        (1 + bass * 0.3);
-
-      const x =
-        i *
-        (barWidth + gap);
-
-      const y =
-        h -
-        height -
-        20;
-
-      ctx.fillStyle =
-        RICKSHAW[
-          i % RICKSHAW.length
-        ];
-
-      ctx.shadowBlur = 8;
-
-      ctx.shadowColor =
-        ctx.fillStyle;
-
-      ctx.fillRect(
-        x,
-        y,
-        barWidth,
-        height
-      );
-
-    }
-
-    ctx.shadowBlur = 0;
-
-    drawRickshawBorder();
-
+  function barLayout(count, gap) {
+    return (W - gap * (count - 1)) / count;
   }
 
-
   // =========================================================
-  // MAIN CANVAS PAINTER
+  // VISUALIZERS
   // =========================================================
-
-  function paintCanvas(
-    freqBytes,
-    timeBytes,
-    bass,
-    style,
-    title
-  ) {
-
-    const w = canvas.width;
-    const h = canvas.height;
-
-    // Clear frame first.
-    ctx.clearRect(
-      0,
-      0,
-      w,
-      h
-    );
-
-    // Background.
-    drawBackground(bass);
-
-
-    // Visualizer.
-    switch (style) {
-
-      case 'wave':
-        drawWave(
-          timeBytes,
-          bass
-        );
-        break;
-
-
-      case 'circle':
-        drawCircle(
-          freqBytes,
-          bass
-        );
-        break;
-
-
-      case 'mirror':
-        drawMirror(
-          freqBytes,
-          bass
-        );
-        break;
-
-
-      case 'neon':
-        drawNeon(
-          freqBytes,
-          bass
-        );
-        break;
-
-
-      case 'radial':
-        drawRadial(
-          freqBytes,
-          bass
-        );
-        break;
-
-
-      case 'dots':
-        drawDots(
-          freqBytes,
-          bass
-        );
-        break;
-
-
-      case 'orbit':
-        drawOrbit(
-          freqBytes,
-          bass
-        );
-        break;
-
-
-      case 'particles':
-        drawParticles(
-          freqBytes,
-          bass
-        );
-        break;
-
-
-      case 'aurora':
-        drawAurora(
-          freqBytes,
-          bass
-        );
-        break;
-
-
-      case 'flame':
-        drawFlame(
-          freqBytes,
-          bass
-        );
-        break;
-
-
-      case 'glass':
-        drawGlass(
-          freqBytes,
-          bass
-        );
-        break;
-
-
-      case 'rickshaw':
-        drawRickshaw(
-          freqBytes,
-          bass
-        );
-        break;
-
-
-      case 'bars':
-      default:
-        drawBars(
-          freqBytes,
-          bass
-        );
-        break;
-
+  function drawBars(freq, bass) {
+    const count = 64, gap = 5 * S, bw = barLayout(count, gap), v = vals(freq, count);
+    ctx.fillStyle = grad('bars', 0, H * 0.3, 0, H, [[0, '#22d3ee'], [0.5, '#818cf8'], [1, '#f472b6']]);
+    ctx.beginPath();
+    for (let i = 0; i < count; i++) {
+      const bh = Math.max(4 * S, v[i] * H * 0.52 * (1 + bass * 0.35));
+      ctx.rect(i * (bw + gap), H - bh - 24 * S, bw, bh);
     }
-
-
-    // Title on top.
-    drawTitle(title);
-
+    ctx.fill();
   }
 
-
-  // =========================================================
-  // AUDIO GRAPH FOR LIVE PREVIEW
-  // =========================================================
-
-  function setupAudioGraph() {
-
-    if (audioCtx) {
-      return;
+  function drawWave(tb, bass) {
+    const n = tb.length, cy = H * 0.53, sl = W / (n - 1), amp = H * 0.28 * (1 + bass * 0.25);
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    for (let i = 0; i < n; i++) {
+      const y = cy + (tb[i] - 128) / 128 * amp;
+      if (i === 0) ctx.moveTo(0, y); else ctx.lineTo(i * sl, y);
     }
-
-    const AudioContextClass =
-      window.AudioContext ||
-      window.webkitAudioContext;
-
-    if (!AudioContextClass) {
-
-      setStatus(
-        'Web Audio API is not supported in this browser.'
-      );
-
-      return;
-
-    }
-
-    audioCtx =
-      new AudioContextClass();
-
-    srcNode =
-      audioCtx.createMediaElementSource(
-        audioEl
-      );
-
-    analyser =
-      audioCtx.createAnalyser();
-
-    analyser.fftSize = 256;
-
-    analyser.smoothingTimeConstant =
-      0.78;
-
-    srcNode.connect(
-      analyser
-    );
-
-    analyser.connect(
-      audioCtx.destination
-    );
-
-    freqLive =
-      new Uint8Array(
-        analyser.frequencyBinCount
-      );
-
-    timeLive =
-      new Uint8Array(
-        analyser.fftSize
-      );
-
+    ctx.strokeStyle = 'rgba(34,211,238,0.25)';
+    ctx.lineWidth = 16 * S;
+    ctx.stroke();
+    ctx.strokeStyle = '#67e8f9';
+    ctx.lineWidth = 5 * S;
+    ctx.stroke();
   }
 
-
-  // =========================================================
-  // LIVE LOOP
-  // =========================================================
-
-  function liveLoop() {
-
-    if (!analyser) {
-      return;
-    }
-
-    analyser.getByteFrequencyData(
-      freqLive
-    );
-
-    analyser.getByteTimeDomainData(
-      timeLive
-    );
-
-
-    let bassSum = 0;
-
-    const bassBins =
-      Math.min(
-        12,
-        freqLive.length
-      );
-
-    for (
-      let i = 0;
-      i < bassBins;
-      i++
-    ) {
-
-      bassSum +=
-        freqLive[i];
-
-    }
-
-
-    const bass =
-      (bassSum / bassBins) / 255;
-
-
-    paintCanvas(
-      freqLive,
-      timeLive,
-      bass,
-      styleSelect.value,
-      titleInput.value.trim()
-    );
-
-
-    if (audioEl.duration) {
-
-      const percentage =
-        (
-          audioEl.currentTime /
-          audioEl.duration
-        ) * 100;
-
-      progressBar.style.width =
-        percentage + '%';
-
-    }
-
-
-    if (
-      !audioEl.paused &&
-      !audioEl.ended
-    ) {
-
-      rafId =
-        requestAnimationFrame(
-          liveLoop
-        );
-
-    } else {
-
-      rafId = null;
-
-    }
-
+  function drawCircle(freq, bass) {
+    const m = Math.min(W, H), baseR = m * 0.17 * (1 + bass * 0.2), v = vals(freq, 128);
+    drawRays(v, 128, baseR, m * 0.30, 190, 160, 4 * S);
+    ctx.beginPath();
+    ctx.arc(W / 2, H / 2, baseR, 0, TAU);
+    ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+    ctx.lineWidth = 9 * S;
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+    ctx.lineWidth = 2 * S;
+    ctx.stroke();
   }
 
+  function drawMirror(freq, bass) {
+    const count = 64, gap = 4 * S, bw = barLayout(count, gap), v = vals(freq, count), c = H * 0.57;
+    ctx.fillStyle = grad('mirror', 0, c - H * 0.4, 0, c + H * 0.4,
+      [[0, '#a78bfa'], [0.5, '#22d3ee'], [1, '#f472b6']]);
+    const hs = scratch.mh || (scratch.mh = new Float32Array(count));
+    for (let i = 0; i < count; i++) hs[i] = Math.max(3 * S, v[i] * H * 0.32 * (1 + bass * 0.25));
+    ctx.beginPath();
+    for (let i = 0; i < count; i++) ctx.rect(i * (bw + gap), c - hs[i], bw, hs[i]);
+    ctx.fill();
+    ctx.globalAlpha = 0.72;
+    ctx.beginPath();
+    for (let i = 0; i < count; i++) ctx.rect(i * (bw + gap), c, bw, hs[i]);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
 
-  // =========================================================
-  // PREVIEW BUTTON
-  // =========================================================
-
-  previewBtn.addEventListener(
-    'click',
-    async function () {
-
-      setupAudioGraph();
-
-      if (!audioCtx) {
-        return;
-      }
-
-      if (
-        audioCtx.state ===
-        'suspended'
-      ) {
-
-        await audioCtx.resume();
-
-      }
-
-
-      if (audioEl.paused) {
-
-        if (audioEl.ended) {
-          audioEl.currentTime = 0;
+  function drawNeon(freq, bass) {
+    const count = 72, gap = 3 * S, bw = barLayout(count, gap), v = vals(freq, count);
+    const hs = scratch.nh || (scratch.nh = new Float32Array(count));
+    for (let i = 0; i < count; i++) hs[i] = 8 * S + v[i] * H * 0.52 * (1 + bass * 0.4);
+    for (let pass = 0; pass < 2; pass++) {
+      const pad = pass ? 0 : 5 * S;
+      ctx.globalAlpha = pass ? 1 : 0.22;
+      for (let c = 0; c < NEON.length; c++) {
+        ctx.fillStyle = NEON[c];
+        ctx.beginPath();
+        for (let i = c; i < count; i += NEON.length) {
+          const w2 = bw + pad * 2;
+          rr(i * (bw + gap) - pad, H - hs[i] - 20 * S - pad, w2, hs[i] + pad * 2, w2 / 2);
         }
-
-        try {
-
-          await audioEl.play();
-
-        } catch (error) {
-
-          setStatus(
-            'Could not start audio preview.'
-          );
-
-          return;
-
-        }
-
-        previewBtn.textContent =
-          '⏸ Pause';
-
-        setStatus(
-          'Previewing ' +
-          styleSelect.options[
-            styleSelect.selectedIndex
-          ].text +
-          '…'
-        );
-
-        if (!rafId) {
-          liveLoop();
-        }
-
-      } else {
-
-        audioEl.pause();
-
-        previewBtn.textContent =
-          '▶ Preview';
-
-        setStatus(
-          'Preview paused.'
-        );
-
+        ctx.fill();
       }
-
     }
-  );
+    ctx.globalAlpha = 1;
+  }
 
+  function drawRadial(freq, bass) {
+    const m = Math.min(W, H), v = vals(freq, 96);
+    drawRays(v, 96, m * 0.12, m * 0.38 * (1 + bass * 0.25), 190, 288, 3 * S);
+  }
 
-  // =========================================================
-  // CHANGE STYLE WHILE PREVIEWING
-  // =========================================================
-
-  styleSelect.addEventListener(
-    'change',
-    function () {
-
-      if (
-        audioEl.paused &&
-        img
-      ) {
-
-        paintCanvas(
-          new Uint8Array(128),
-          new Uint8Array(128),
-          0,
-          styleSelect.value,
-          titleInput.value.trim()
-        );
-
-      }
-
-      if (!audioEl.paused) {
-
-        setStatus(
-          'Previewing ' +
-          styleSelect.options[
-            styleSelect.selectedIndex
-          ].text +
-          '…'
-        );
-
-      }
-
+  function drawDots(freq, bass) {
+    const count = 100, v = vals(freq, count);
+    const xs = scratch.dx || (scratch.dx = new Float32Array(count));
+    const ys = scratch.dy || (scratch.dy = new Float32Array(count));
+    const rs = scratch.dr || (scratch.dr = new Float32Array(count));
+    for (let i = 0; i < count; i++) {
+      xs[i] = i / count * W;
+      ys[i] = H * 0.72 - v[i] * H * 0.48;
+      rs[i] = (3 + v[i] * 10 + bass * 3) * S;
     }
-  );
+    paintDots(xs, ys, rs, count, 190, 150, 10, 1);
+  }
 
-
-  // =========================================================
-  // LIVE TITLE UPDATE
-  // =========================================================
-
-  titleInput.addEventListener(
-    'input',
-    function () {
-
-      if (
-        audioEl.paused &&
-        img
-      ) {
-
-        paintCanvas(
-          new Uint8Array(128),
-          new Uint8Array(128),
-          0,
-          styleSelect.value,
-          titleInput.value.trim()
-        );
-
-      }
-
+  function drawOrbit(freq, bass) {
+    const m = Math.min(W, H), cx = W / 2, cy = H / 2, base = m * 0.16, count = 72, v = vals(freq, count);
+    ctx.lineWidth = 2 * S;
+    for (let r = 0; r < 4; r++) {
+      ctx.beginPath();
+      ctx.arc(cx, cy, base + r * 55 * S + bass * 20 * S, 0, TAU);
+      ctx.strokeStyle = 'rgba(103,232,249,' + (0.18 + r * 0.05) + ')';
+      ctx.stroke();
     }
-  );
-
-
-  // =========================================================
-  // AUDIO ENDED
-  // =========================================================
-
-  audioEl.addEventListener(
-    'ended',
-    function () {
-
-      setStatus(
-        'Preview finished.'
-      );
-
-      progressBar.style.width =
-        '0%';
-
-      previewBtn.textContent =
-        '▶ Preview';
-
+    const xs = scratch.ox || (scratch.ox = new Float32Array(count));
+    const ys = scratch.oy || (scratch.oy = new Float32Array(count));
+    const rs = scratch.or || (scratch.or = new Float32Array(count));
+    for (let i = 0; i < count; i++) {
+      const a = i / count * TAU, rad = base + v[i] * m * 0.30;
+      xs[i] = cx + Math.cos(a) * rad;
+      ys[i] = cy + Math.sin(a) * rad;
+      rs[i] = (2 + v[i] * 8) * S;
     }
-  );
+    paintDots(xs, ys, rs, count, 180, 180, 9, 1);
+  }
 
-
-  // =========================================================
-  // OFFLINE AUDIO FFT
-  // =========================================================
-
-  const FFT_SIZE = 256;
-
-
-  const HANN = (() => {
-
-    const windowData =
-      new Float32Array(
-        FFT_SIZE
-      );
-
-    for (
-      let i = 0;
-      i < FFT_SIZE;
-      i++
-    ) {
-
-      windowData[i] =
-        0.5 *
-        (
-          1 -
-          Math.cos(
-            2 *
-            Math.PI *
-            i /
-            (FFT_SIZE - 1)
-          )
-        );
-
+  // deterministic particle positions (same every frame, same in export)
+  const PCOUNT = 150;
+  const PX = new Float32Array(PCOUNT), PY = new Float32Array(PCOUNT);
+  (function () {
+    for (let i = 0; i < PCOUNT; i++) {
+      const a = Math.sin(i * 12.9898) * 43758.5453, b = Math.sin(i * 78.233) * 12345.6789;
+      PX[i] = a - Math.floor(a);
+      PY[i] = b - Math.floor(b);
     }
-
-    return windowData;
-
   })();
 
+  function drawParticles(freq, bass) {
+    const v = vals(freq, PCOUNT);
+    const xs = scratch.px || (scratch.px = new Float32Array(PCOUNT));
+    const ys = scratch.py || (scratch.py = new Float32Array(PCOUNT));
+    const rs = scratch.pr || (scratch.pr = new Float32Array(PCOUNT));
+    for (let i = 0; i < PCOUNT; i++) {
+      xs[i] = PX[i] * W;
+      ys[i] = PY[i] * H - v[i] * H * 0.20;
+      rs[i] = (1.5 + v[i] * 5 + bass * 2) * S;
+    }
+    paintDots(xs, ys, rs, PCOUNT, 185, 150, 10, 0.85);
+  }
+
+  function drawAurora(freq, bass) {
+    const step = 12 * S, cols = Math.ceil(W / step) + 1, v = vals(freq, cols);
+    ctx.globalCompositeOperation = 'screen';
+    for (let layer = 0; layer < 5; layer++) {
+      const amp = H * (0.07 + bass * 0.08) * (1 + layer * 0.1);
+      ctx.beginPath();
+      for (let k = 0; k < cols; k++) {
+        const x = Math.min(W, k * step);
+        const y = H * 0.58 + Math.sin(x / S * 0.008 + layer * 0.9) * amp - v[k] * H * 0.18 - layer * 25 * S;
+        if (k === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.lineTo(W, H);
+      ctx.lineTo(0, H);
+      ctx.closePath();
+      ctx.fillStyle = grad('au' + layer, 0, 0, W, 0, [
+        [0, 'hsla(' + (180 + layer * 25) + ',90%,60%,0.12)'],
+        [0.5, 'hsla(' + (230 + layer * 20) + ',90%,65%,0.20)'],
+        [1, 'hsla(' + (310 + layer * 10) + ',90%,65%,0.12)']
+      ]);
+      ctx.fill();
+    }
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  function drawFlame(freq, bass) {
+    const count = 70, gap = 3 * S, bw = barLayout(count, gap), v = vals(freq, count);
+    const hs = scratch.fh || (scratch.fh = new Float32Array(count));
+    for (let i = 0; i < count; i++) hs[i] = 8 * S + v[i] * H * 0.60 * (1 + bass * 0.35);
+    const p = 5 * S;
+    ctx.globalAlpha = 0.18;
+    ctx.fillStyle = '#f97316';
+    ctx.beginPath();
+    for (let i = 0; i < count; i++) ctx.rect(i * (bw + gap) - p, H - hs[i] - 18 * S - p, bw + p * 2, hs[i] + p * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = grad('flame', 0, H * 0.3, 0, H, [
+      [0, '#fff7ed'], [0.18, '#facc15'], [0.48, '#fb923c'], [0.75, '#ef4444'], [1, '#7f1d1d']
+    ]);
+    ctx.beginPath();
+    for (let i = 0; i < count; i++) ctx.rect(i * (bw + gap), H - hs[i] - 18 * S, bw, hs[i]);
+    ctx.fill();
+  }
+
+  function drawGlass(freq, bass) {
+    const count = 56, gap = 7 * S, bw = barLayout(count, gap), v = vals(freq, count);
+    ctx.fillStyle = grad('glass', 0, H * 0.3, 0, H, [
+      [0, 'rgba(255,255,255,0.85)'], [0.45, 'rgba(125,211,252,0.52)'], [1, 'rgba(244,114,182,0.20)']
+    ]);
+    ctx.strokeStyle = 'rgba(255,255,255,0.45)';
+    ctx.lineWidth = 1.5 * S;
+    ctx.beginPath();
+    for (let i = 0; i < count; i++) {
+      const bh = 12 * S + v[i] * H * 0.48 * (1 + bass * 0.25);
+      rr(i * (bw + gap), H - bh - 25 * S, bw, bh, 8 * S);
+    }
+    ctx.fill();
+    ctx.stroke();
+  }
+
+  function drawRickshaw(freq, bass) {
+    const count = 64, gap = 4 * S, bw = barLayout(count, gap), v = vals(freq, count);
+    const hs = scratch.rh || (scratch.rh = new Float32Array(count));
+    for (let i = 0; i < count; i++) hs[i] = Math.max(2 * S, v[i] * H * 0.58 * (1 + bass * 0.3));
+    const n = RICKSHAW.length;
+    for (let pass = 0; pass < 2; pass++) {
+      const pad = pass ? 0 : 4 * S;
+      ctx.globalAlpha = pass ? 1 : 0.25;
+      for (let c = 0; c < n; c++) {
+        ctx.fillStyle = RICKSHAW[c];
+        ctx.beginPath();
+        for (let i = c; i < count; i += n) {
+          ctx.rect(i * (bw + gap) - pad, H - hs[i] - 20 * S - pad, bw + pad * 2, hs[i] + pad * 2);
+        }
+        ctx.fill();
+      }
+    }
+    ctx.globalAlpha = 1;
+
+    // border of semicircles
+    const r = 12 * S, step = r * 2, total = Math.ceil(W / step);
+    for (let c = 0; c < n; c++) {
+      ctx.fillStyle = RICKSHAW[c];
+      ctx.beginPath();
+      for (let i = c; i < total; i += n) {
+        const x = i * step;
+        ctx.moveTo(x, H - r);
+        ctx.arc(x + r, H - r, r, Math.PI, 0);
+      }
+      ctx.fill();
+    }
+  }
+
+  const STYLES = {
+    bars: drawBars, wave: drawWave, circle: drawCircle, mirror: drawMirror, neon: drawNeon,
+    radial: drawRadial, dots: drawDots, orbit: drawOrbit, particles: drawParticles,
+    aurora: drawAurora, flame: drawFlame, glass: drawGlass, rickshaw: drawRickshaw
+  };
 
   // =========================================================
-  // FFT
+  // MAIN PAINTER
   // =========================================================
+  function paintCanvas(freq, timeB, bass, style, title) {
+    if (canvas.width !== W || canvas.height !== H) useSurface(canvas);
+    drawBackground(bass);
+    const fn = STYLES[style] || drawBars;
+    fn(style === 'wave' ? timeB : freq, bass, timeB);
+    drawTitle(title);
+  }
+
+  // =========================================================
+  // LIVE PREVIEW
+  // =========================================================
+  function setupAudioGraph() {
+    if (audioCtx) return;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) { setStatus('Web Audio API is not supported in this browser.'); return; }
+    audioCtx = new AC();
+    const src = audioCtx.createMediaElementSource(audioEl);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 256;
+    analyser.smoothingTimeConstant = 0.78;
+    src.connect(analyser);
+    analyser.connect(audioCtx.destination);
+    freqLive = new Uint8Array(analyser.frequencyBinCount);
+    timeLive = new Uint8Array(analyser.fftSize);
+  }
+
+  function liveLoop() {
+    if (!analyser || exporting) { rafId = null; return; }
+    if (canvas !== previewCanvas) useSurface(previewCanvas);
+
+    analyser.getByteFrequencyData(freqLive);
+    analyser.getByteTimeDomainData(timeLive);
+
+    let sum = 0;
+    const nb = Math.min(12, freqLive.length);
+    for (let i = 0; i < nb; i++) sum += freqLive[i];
+    bassSmooth = bassSmooth * 0.6 + (sum / nb / 255) * 0.4;
+
+    paintCanvas(freqLive, timeLive, bassSmooth, styleSelect.value, titleInput.value.trim());
+
+    if (audioEl.duration) progressBar.style.width = (audioEl.currentTime / audioEl.duration * 100) + '%';
+
+    if (!audioEl.paused && !audioEl.ended) rafId = requestAnimationFrame(liveLoop);
+    else rafId = null;
+  }
+
+  previewBtn.addEventListener('click', async function () {
+    setupAudioGraph();
+    if (!audioCtx) return;
+    if (audioCtx.state === 'suspended') await audioCtx.resume();
+
+    if (audioEl.paused) {
+      if (audioEl.ended) audioEl.currentTime = 0;
+      try { await audioEl.play(); }
+      catch (err) { setStatus('Could not start audio preview.'); return; }
+      previewBtn.textContent = '⏸ Pause';
+      setStatus('Previewing ' + styleSelect.options[styleSelect.selectedIndex].text + '…');
+      if (!rafId) liveLoop();
+    } else {
+      audioEl.pause();
+      previewBtn.textContent = '▶ Preview';
+      setStatus('Preview paused.');
+    }
+  });
+
+  styleSelect.addEventListener('change', function () {
+    if (audioEl.paused) paintIdle();
+    else setStatus('Previewing ' + styleSelect.options[styleSelect.selectedIndex].text + '…');
+  });
+
+  titleInput.addEventListener('input', function () {
+    if (audioEl.paused) paintIdle();
+  });
+
+  audioEl.addEventListener('ended', function () {
+    setStatus('Preview finished.');
+    progressBar.style.width = '0%';
+    previewBtn.textContent = '▶ Preview';
+  });
+
+  // =========================================================
+  // OFFLINE FFT (precomputed tables = fast)
+  // =========================================================
+  const FFT_N = 256;
+
+  const HANN = new Float32Array(FFT_N);
+  for (let i = 0; i < FFT_N; i++) HANN[i] = 0.5 * (1 - Math.cos(TAU * i / (FFT_N - 1)));
+
+  const REV = new Uint16Array(FFT_N);
+  (function () {
+    const bits = Math.log2(FFT_N);
+    for (let i = 0; i < FFT_N; i++) {
+      let r = 0;
+      for (let b = 0; b < bits; b++) if (i & (1 << b)) r |= 1 << (bits - 1 - b);
+      REV[i] = r;
+    }
+  })();
+
+  const TW_COS = new Float32Array(FFT_N / 2), TW_SIN = new Float32Array(FFT_N / 2);
+  for (let k = 0; k < FFT_N / 2; k++) {
+    TW_COS[k] = Math.cos(TAU * k / FFT_N);
+    TW_SIN[k] = -Math.sin(TAU * k / FFT_N);
+  }
 
   function fft(re, im) {
-
-    const n =
-      re.length;
-
-
-    // Bit reversal.
-    for (
-      let i = 1, j = 0;
-      i < n;
-      i++
-    ) {
-
-      let bit =
-        n >> 1;
-
-      for (
-        ;
-        j & bit;
-        bit >>= 1
-      ) {
-
-        j ^= bit;
-
-      }
-
-      j ^= bit;
-
-
+    for (let i = 0; i < FFT_N; i++) {
+      const j = REV[i];
       if (i < j) {
-
-        let temp =
-          re[i];
-
-        re[i] =
-          re[j];
-
-        re[j] =
-          temp;
-
-
-        temp =
-          im[i];
-
-        im[i] =
-          im[j];
-
-        im[j] =
-          temp;
-
+        let t = re[i]; re[i] = re[j]; re[j] = t;
+        t = im[i]; im[i] = im[j]; im[j] = t;
       }
-
     }
-
-
-    // FFT stages.
-    for (
-      let len = 2;
-      len <= n;
-      len <<= 1
-    ) {
-
-      const angle =
-        -2 *
-        Math.PI /
-        len;
-
-      const wr =
-        Math.cos(angle);
-
-      const wi =
-        Math.sin(angle);
-
-
-      for (
-        let i = 0;
-        i < n;
-        i += len
-      ) {
-
-        let currentWr = 1;
-        let currentWi = 0;
-
-
-        for (
-          let j = 0;
-          j < len / 2;
-          j++
-        ) {
-
-          const ur =
-            re[i + j];
-
-          const ui =
-            im[i + j];
-
-
-          const vr =
-            re[
-              i +
-              j +
-              len / 2
-            ] *
-            currentWr -
-            im[
-              i +
-              j +
-              len / 2
-            ] *
-            currentWi;
-
-
-          const vi =
-            re[
-              i +
-              j +
-              len / 2
-            ] *
-            currentWi +
-            im[
-              i +
-              j +
-              len / 2
-            ] *
-            currentWr;
-
-
-          re[i + j] =
-            ur + vr;
-
-          im[i + j] =
-            ui + vi;
-
-
-          re[
-            i +
-            j +
-            len / 2
-          ] =
-            ur - vr;
-
-          im[
-            i +
-            j +
-            len / 2
-          ] =
-            ui - vi;
-
-
-          const nextWr =
-            currentWr * wr -
-            currentWi * wi;
-
-          const nextWi =
-            currentWr * wi +
-            currentWi * wr;
-
-
-          currentWr =
-            nextWr;
-
-          currentWi =
-            nextWi;
-
+    for (let size = 2; size <= FFT_N; size <<= 1) {
+      const half = size >> 1, step = FFT_N / size;
+      for (let i = 0; i < FFT_N; i += size) {
+        for (let j = 0, k = 0; j < half; j++, k += step) {
+          const wr = TW_COS[k], wi = TW_SIN[k];
+          const a = i + j, b = a + half;
+          const vr = re[b] * wr - im[b] * wi;
+          const vi = re[b] * wi + im[b] * wr;
+          re[b] = re[a] - vr; im[b] = im[a] - vi;
+          re[a] += vr; im[a] += vi;
         }
-
       }
-
     }
-
   }
 
+  const F_RE = new Float32Array(FFT_N), F_IM = new Float32Array(FFT_N);
+  const F_FREQ = new Uint8Array(128), F_TIME = new Uint8Array(128);
+  const FRAME = { freq: F_FREQ, time: F_TIME, bass: 0 };
 
-  // =========================================================
-  // COMPUTE AUDIO FRAME
-  // =========================================================
+  function computeFrameData(mono, sampleRate, time, smoothed) {
+    const center = Math.round(time * sampleRate), half = FFT_N / 2, len = mono.length;
 
-  function computeFrameData(
-    mono,
-    sampleRate,
-    time,
-    smoothed
-  ) {
+    for (let i = 0; i < FFT_N; i++) {
+      const idx = center - half + i;
+      F_RE[i] = (idx >= 0 && idx < len ? mono[idx] : 0) * HANN[i];
+      F_IM[i] = 0;
+    }
+    fft(F_RE, F_IM);
 
-    const N =
-      FFT_SIZE;
-
-    const half =
-      N / 2;
-
-
-    const center =
-      Math.round(
-        time *
-        sampleRate
-      );
-
-
-    const re =
-      new Float32Array(N);
-
-    const im =
-      new Float32Array(N);
-
-
-    // Prepare FFT window.
-    for (
-      let i = 0;
-      i < N;
-      i++
-    ) {
-
-      const index =
-        center -
-        half +
-        i;
-
-      const sample =
-        (
-          index >= 0 &&
-          index < mono.length
-        )
-          ? mono[index]
-          : 0;
-
-      re[i] =
-        sample *
-        HANN[i];
-
+    for (let k = 0; k < 128; k++) {
+      const mag = Math.sqrt(F_RE[k] * F_RE[k] + F_IM[k] * F_IM[k]) / FFT_N;
+      const db = mag > 0 ? 20 * Math.log10(mag) : -100;
+      let v = (db + 100) / 70 * 255;
+      v = v < 0 ? 0 : v > 255 ? 255 : v;
+      smoothed[k] = smoothed[k] * 0.55 + v * 0.45;
+      F_FREQ[k] = smoothed[k];
     }
 
-
-    fft(
-      re,
-      im
-    );
-
-
-    // Frequency data.
-    const freqBytes =
-      new Uint8Array(128);
-
-
-    const minDb =
-      -100;
-
-    const maxDb =
-      -30;
-
-
-    for (
-      let k = 0;
-      k < 128;
-      k++
-    ) {
-
-      const magnitude =
-        Math.sqrt(
-          re[k] * re[k] +
-          im[k] * im[k]
-        ) / N;
-
-
-      const db =
-        magnitude > 0
-          ? 20 *
-            Math.log10(magnitude)
-          : minDb;
-
-
-      let value =
-        (
-          (db - minDb) /
-          (maxDb - minDb)
-        ) * 255;
-
-
-      value =
-        Math.max(
-          0,
-          Math.min(
-            255,
-            value
-          )
-        );
-
-
-      // Smoothing makes exported animation less jittery.
-      smoothed[k] =
-        smoothed[k] * 0.55 +
-        value * 0.45;
-
-
-      freqBytes[k] =
-        smoothed[k];
-
+    for (let k = 0; k < 128; k++) {
+      const idx = center - half + k * 2;
+      const s = idx >= 0 && idx < len ? mono[idx] : 0;
+      const b = Math.round((s * 0.5 + 0.5) * 255);
+      F_TIME[k] = b < 0 ? 0 : b > 255 ? 255 : b;
     }
 
-
-    // Time domain data.
-    const timeBytes =
-      new Uint8Array(128);
-
-
-    for (
-      let k = 0;
-      k < 128;
-      k++
-    ) {
-
-      const index =
-        center -
-        half +
-        k * 2;
-
-
-      const sample =
-        (
-          index >= 0 &&
-          index < mono.length
-        )
-          ? mono[index]
-          : 0;
-
-
-      timeBytes[k] =
-        Math.max(
-          0,
-          Math.min(
-            255,
-            Math.round(
-              (
-                sample *
-                0.5 +
-                0.5
-              ) * 255
-            )
-          )
-        );
-
-    }
-
-
-    // Bass detection.
-    let bassSum = 0;
-
-    const bassBins = 8;
-
-    for (
-      let i = 0;
-      i < bassBins;
-      i++
-    ) {
-
-      bassSum +=
-        freqBytes[i];
-
-    }
-
-
-    const bass =
-      (
-        bassSum /
-        bassBins
-      ) / 255;
-
-
-    return {
-      freqBytes,
-      timeBytes,
-      bass
-    };
-
+    let sum = 0;
+    for (let i = 0; i < 8; i++) sum += F_FREQ[i];
+    FRAME.bass = sum / 8 / 255;
+    return FRAME;
   }
 
+  // =========================================================
+  // EXPORT HELPERS
+  // =========================================================
+  const mc = new MessageChannel();
+  function yieldMain() {
+    return new Promise(function (resolve) {
+      mc.port1.onmessage = function () { resolve(); };
+      mc.port2.postMessage(0);
+    });
+  }
 
-  // =========================================================
-  // FINISH UI
-  // =========================================================
+  async function pickFormat(mb, w, h, vb) {
+    // MP4 (H.264 + AAC) first: hardware accelerated = very fast.
+    try {
+      const mp4 = new mb.Mp4OutputFormat({ fastStart: 'in-memory' });
+      const vc = await mb.getFirstEncodableVideoCodec(mp4.getSupportedVideoCodecs(), { width: w, height: h, bitrate: vb });
+      const ac = await mb.getFirstEncodableAudioCodec(mp4.getSupportedAudioCodecs(), { numberOfChannels: 2, sampleRate: 48000, bitrate: 192000 });
+      if (vc && ac) return { format: mp4, ext: 'mp4', mime: 'video/mp4', vc: vc, ac: ac };
+    } catch (e) { console.warn('MP4 not available, using WebM', e); }
+
+    const webm = new mb.WebMOutputFormat();
+    let vc = 'vp9';
+    try {
+      vc = (await mb.getFirstEncodableVideoCodec(webm.getSupportedVideoCodecs(), { width: w, height: h, bitrate: vb })) || 'vp9';
+    } catch (e) { /* keep vp9 */ }
+    return { format: webm, ext: 'webm', mime: 'video/webm', vc: vc, ac: 'opus' };
+  }
 
   function finishUI() {
-
-    recordBtn.disabled =
-      !canExport ||
-      !img ||
-      !audioReady;
-
-    previewBtn.disabled =
-      !img ||
-      !audioReady;
-
-    recordBtn.textContent =
-      '⏺ Create Video';
-
+    exporting = false;
+    recordBtn.disabled = !canExport || !img || !audioReady;
+    previewBtn.disabled = !img || !audioReady;
+    recordBtn.textContent = '⏺ Create Video';
   }
 
+  function fmtTime(s) {
+    s = Math.max(0, Math.round(s));
+    return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+  }
 
   // =========================================================
   // CREATE VIDEO
   // =========================================================
-
-  recordBtn.addEventListener(
-    'click',
-    async function () {
-
-      if (!canExport) {
-
-        setStatus(
-          'Video export needs Chrome or Edge.'
-        );
-
-        return;
-
-      }
-
-
-      if (!audioFile || !img) {
-
-        setStatus(
-          'Please choose both an audio file and an image.'
-        );
-
-        return;
-
-      }
-
-
-      downloadArea.innerHTML = '';
-
-      recordBtn.disabled = true;
-      previewBtn.disabled = true;
-
-      recordBtn.textContent =
-        '⏳ Working…';
-
-
-      if (!audioEl.paused) {
-        audioEl.pause();
-      }
-
-
-      try {
-
-        // ---------------------------------------------------
-        // DECODE AUDIO
-        // ---------------------------------------------------
-
-        setStatus(
-          'Decoding audio…'
-        );
-
-
-        const arrayBuffer =
-          await audioFile.arrayBuffer();
-
-
-        const AudioContextClass =
-          window.AudioContext ||
-          window.webkitAudioContext;
-
-
-        const decodeCtx =
-          new AudioContextClass();
-
-
-        const audioBuffer =
-          await decodeCtx.decodeAudioData(
-            arrayBuffer.slice(0)
-          );
-
-
-        const duration =
-          audioBuffer.duration;
-
-
-        const sampleRate =
-          audioBuffer.sampleRate;
-
-
-        // ---------------------------------------------------
-        // CONVERT TO MONO
-        // ---------------------------------------------------
-
-        const channels = [];
-
-
-        for (
-          let c = 0;
-          c < audioBuffer.numberOfChannels;
-          c++
-        ) {
-
-          channels.push(
-            audioBuffer.getChannelData(c)
-          );
-
-        }
-
-
-        const mono =
-          new Float32Array(
-            audioBuffer.length
-          );
-
-
-        for (
-          let i = 0;
-          i < mono.length;
-          i++
-        ) {
-
-          let sample = 0;
-
-
-          for (
-            let c = 0;
-            c < channels.length;
-            c++
-          ) {
-
-            sample +=
-              channels[c][i];
-
-          }
-
-
-          mono[i] =
-            sample /
-            channels.length;
-
-        }
-
-
-        // ---------------------------------------------------
-        // SAVE LOCATION
-        // ---------------------------------------------------
-
-        let writableStream = null;
-        let useFS = false;
-
-
-        if (window.showSaveFilePicker) {
-
-          try {
-
-            const handle =
-              await window.showSaveFilePicker({
-
-                suggestedName:
-                  'talkify-video.webm',
-
-                types: [
-                  {
-                    description:
-                      'WebM Video',
-
-                    accept: {
-                      'video/webm': [
-                        '.webm'
-                      ]
-                    }
-                  }
-                ]
-
-              });
-
-
-            writableStream =
-              await handle.createWritable();
-
-            useFS = true;
-
-          } catch (error) {
-
-            if (
-              error &&
-              error.name ===
-              'AbortError'
-            ) {
-
-              setStatus(
-                'Export cancelled.'
-              );
-
-              finishUI();
-
-              return;
-
-            }
-
-            console.warn(
-              'Save picker unavailable. Using browser download.',
-              error
-            );
-
-          }
-
-        }
-
-
-        // ---------------------------------------------------
-        // LOAD MEDIABUNNY
-        // ---------------------------------------------------
-
-        setStatus(
-          'Loading video engine…'
-        );
-
-
-        const {
-          Output,
-          WebMOutputFormat,
-          BufferTarget,
-          StreamTarget,
-          CanvasSource,
-          AudioBufferSource,
-          Quality
-        } = await loadMediabunny();
-
-
-        // ---------------------------------------------------
-        // OUTPUT
-        // ---------------------------------------------------
-
-        const target =
-          useFS
-            ? new StreamTarget(
-                writableStream,
-                {
-                  chunked: true
-                }
-              )
-            : new BufferTarget();
-
-
-        const output =
-          new Output({
-            format:
-              new WebMOutputFormat(),
-
-            target
+  recordBtn.addEventListener('click', async function () {
+    if (!canExport) { setStatus('Video export needs Chrome or Edge.'); return; }
+    if (!audioFile || !img) { setStatus('Please choose both an audio file and an image.'); return; }
+
+    downloadArea.innerHTML = '';
+    recordBtn.disabled = true;
+    previewBtn.disabled = true;
+    recordBtn.textContent = '⏳ Working…';
+    exporting = true;
+
+    if (!audioEl.paused) { audioEl.pause(); previewBtn.textContent = '▶ Preview'; }
+    if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+
+    let writable = null;
+    let output = null;
+
+    try {
+      // ---- engine + settings (before the save dialog, to keep the click permission fresh)
+      setStatus('Loading video engine…');
+      const mb = await loadMediabunny();
+
+      const qSel = $('qualitySelect');
+      const targetH = qSel ? (parseInt(qSel.value, 10) || 1080) : 1080;
+      const ratio = previewCanvas.width / previewCanvas.height;
+      const outH = Math.round(targetH / 2) * 2;
+      const outW = Math.round(targetH * ratio / 2) * 2;
+      const vBitrate = outH >= 1080 ? 8e6 : outH >= 720 ? 5e6 : 3e6;
+      const fps = 30;
+
+      const pf = await pickFormat(mb, outW, outH, vBitrate);
+
+      // ---- save location
+      let useFS = false;
+      if (window.showSaveFilePicker) {
+        try {
+          const handle = await window.showSaveFilePicker({
+            suggestedName: 'songify-video.' + pf.ext,
+            types: [{ description: pf.ext.toUpperCase() + ' Video', accept: { [pf.mime]: ['.' + pf.ext] } }]
           });
-
-
-        const videoSource =
-          new CanvasSource(
-            canvas,
-            {
-              codec: 'vp9',
-
-              quality:
-                new Quality({
-                  bitrate:
-                    5_000_000
-                })
-            }
-          );
-
-
-        const audioSource =
-          new AudioBufferSource(
-            {
-              codec: 'opus',
-
-              quality:
-                new Quality({
-                  bitrate:
-                    128_000
-                })
-            }
-          );
-
-
-        output.addVideoTrack(
-          videoSource,
-          {
-            frameRate: 30
+          writable = await handle.createWritable();
+          useFS = true;
+        } catch (err) {
+          if (err && err.name === 'AbortError') {
+            setStatus('Export cancelled.');
+            finishUI();
+            return;
           }
-        );
-
-
-        output.addAudioTrack(
-          audioSource
-        );
-
-
-        await output.start();
-
-
-        // ---------------------------------------------------
-        // AUDIO TRACK
-        // ---------------------------------------------------
-
-        setStatus(
-          'Encoding audio…'
-        );
-
-
-        await audioSource.add(
-          audioBuffer
-        );
-
-
-        audioSource.close();
-
-
-        // ---------------------------------------------------
-        // VIDEO FRAMES
-        // ---------------------------------------------------
-
-        const fps = 30;
-
-
-        const totalFrames =
-          Math.max(
-            1,
-            Math.ceil(
-              duration * fps
-            )
-          );
-
-
-        const smoothed =
-          new Uint8Array(128);
-
-
-        const title =
-          titleInput.value.trim();
-
-
-        const style =
-          styleSelect.value;
-
-
-        for (
-          let frame = 0;
-          frame < totalFrames;
-          frame++
-        ) {
-
-          const time =
-            frame / fps;
-
-
-          const {
-            freqBytes,
-            timeBytes,
-            bass
-          } =
-            computeFrameData(
-              mono,
-              sampleRate,
-              time,
-              smoothed
-            );
-
-
-          // Same painter used by live preview.
-          paintCanvas(
-            freqBytes,
-            timeBytes,
-            bass,
-            style,
-            title
-          );
-
-
-          await videoSource.add(
-            time,
-            1 / fps
-          );
-
-
-          const percentage =
-            Math.round(
-              (
-                (frame + 1) /
-                totalFrames
-              ) * 100
-            );
-
-
-          progressBar.style.width =
-            percentage + '%';
-
-
-          setStatus(
-            'Rendering video… ' +
-            percentage +
-            '%'
-          );
-
-
-          // Give browser UI a chance to update.
-          if (frame % 10 === 0) {
-            await new Promise(
-              resolve =>
-                setTimeout(
-                  resolve,
-                  0
-                )
-            );
-          }
-
+          console.warn('Save picker unavailable. Using browser download.', err);
         }
-
-
-        // ---------------------------------------------------
-        // FINALIZE
-        // ---------------------------------------------------
-
-        videoSource.close();
-
-
-        setStatus(
-          'Finishing up…'
-        );
-
-
-        await output.finalize();
-
-
-        // ---------------------------------------------------
-        // FILE SYSTEM SAVE
-        // ---------------------------------------------------
-
-        if (useFS) {
-
-          setStatus(
-            'Saved! ✅'
-          );
-
-          progressBar.style.width =
-            '0%';
-
-        }
-
-
-        // ---------------------------------------------------
-        // BROWSER DOWNLOAD
-        // ---------------------------------------------------
-
-        else {
-
-          const buffer =
-            output.target.buffer;
-
-
-          const blob =
-            new Blob(
-              [buffer],
-              {
-                type:
-                  'video/webm'
-              }
-            );
-
-
-          const url =
-            URL.createObjectURL(
-              blob
-            );
-
-
-          // Auto download.
-          const a =
-            document.createElement(
-              'a'
-            );
-
-
-          a.href = url;
-
-          a.download =
-            'talkify-video.webm';
-
-
-          document.body.appendChild(
-            a
-          );
-
-          a.click();
-
-          a.remove();
-
-
-          // Manual download button.
-          const link =
-            document.createElement(
-              'a'
-            );
-
-
-          link.href = url;
-
-          link.download =
-            'talkify-video.webm';
-
-
-          link.className =
-            'dl-btn';
-
-
-          link.textContent =
-            '⬇ Download Video (' +
-            (
-              blob.size /
-              1024 /
-              1024
-            ).toFixed(1) +
-            ' MB)';
-
-
-          downloadArea.appendChild(
-            link
-          );
-
-
-          setStatus(
-            'Video ready! If it did not auto-download, use the button below.'
-          );
-
-
-          progressBar.style.width =
-            '0%';
-
-        }
-
-
-        finishUI();
-
-
-      } catch (error) {
-
-        console.error(
-          'Export failed:',
-          error
-        );
-
-
-        setStatus(
-          'Export failed: ' +
-          (
-            error &&
-            error.message
-              ? error.message
-              : error
-          ) +
-          '. Try Chrome or Edge.'
-        );
-
-
-        progressBar.style.width =
-          '0%';
-
-
-        finishUI();
-
       }
 
+      // ---- decode audio
+      setStatus('Decoding audio…');
+      const AC = window.AudioContext || window.webkitAudioContext;
+      const dctx = new AC();
+      const audioBuffer = await dctx.decodeAudioData((await audioFile.arrayBuffer()).slice(0));
+      if (dctx.close) dctx.close();
+
+      const duration = audioBuffer.duration;
+      const sampleRate = audioBuffer.sampleRate;
+      const nCh = audioBuffer.numberOfChannels;
+      const mono = new Float32Array(audioBuffer.length);
+      for (let c = 0; c < nCh; c++) {
+        const d = audioBuffer.getChannelData(c);
+        for (let i = 0; i < mono.length; i++) mono[i] += d[i] / nCh;
+      }
+
+      // ---- output
+      const target = useFS ? new mb.StreamTarget(writable, { chunked: true }) : new mb.BufferTarget();
+      output = new mb.Output({ format: pf.format, target: target });
+
+      const exportCanvas = document.createElement('canvas');
+      exportCanvas.width = outW;
+      exportCanvas.height = outH;
+      useSurface(exportCanvas, { alpha: false });
+
+      const videoSource = new mb.CanvasSource(exportCanvas, { codec: pf.vc, bitrate: vBitrate });
+      const audioSource = new mb.AudioBufferSource({ codec: pf.ac, bitrate: 192000 });
+      output.addVideoTrack(videoSource, { frameRate: fps });
+      output.addAudioTrack(audioSource);
+      await output.start();
+
+      setStatus('Encoding audio…');
+      await audioSource.add(audioBuffer);
+      audioSource.close();
+
+      // ---- frames
+      const totalFrames = Math.max(1, Math.ceil(duration * fps));
+      const smoothed = new Float32Array(128);
+      const title = titleInput.value.trim();
+      const style = styleSelect.value;
+      bassSmooth = 0;
+      const t0 = performance.now();
+
+      for (let frame = 0; frame < totalFrames; frame++) {
+        const time = frame / fps;
+        const f = computeFrameData(mono, sampleRate, time, smoothed);
+        bassSmooth = bassSmooth * 0.6 + f.bass * 0.4;
+        paintCanvas(f.freq, f.time, bassSmooth, style, title);
+
+        await videoSource.add(time, 1 / fps);
+
+        if (frame % 8 === 0 || frame === totalFrames - 1) {
+          const pct = Math.round((frame + 1) / totalFrames * 100);
+          const elapsed = (performance.now() - t0) / 1000;
+          const speed = (time + 1 / fps) / Math.max(0.001, elapsed);
+          const eta = (duration - (time + 1 / fps)) / Math.max(0.01, speed);
+          progressBar.style.width = pct + '%';
+          setStatus('Rendering ' + pct + '%  ·  ' + speed.toFixed(1) + '× speed  ·  ' + fmtTime(eta) + ' left');
+          await yieldMain();
+        }
+      }
+
+      videoSource.close();
+      setStatus('Finishing up…');
+      await output.finalize();
+
+      // ---- deliver
+      if (useFS) {
+        setStatus('Saved! ✅');
+      } else {
+        const blob = new Blob([output.target.buffer], { type: pf.mime });
+        const url = URL.createObjectURL(blob);
+
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'songify-video.' + pf.ext;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = 'songify-video.' + pf.ext;
+        link.className = 'dl-btn';
+        link.textContent = '⬇ Download Video (' + (blob.size / 1048576).toFixed(1) + ' MB)';
+        downloadArea.appendChild(link);
+
+        setStatus('Video ready! If it did not auto-download, use the button below.');
+      }
+      progressBar.style.width = '0%';
+
+    } catch (error) {
+      console.error('Export failed:', error);
+      setStatus('Export failed: ' + (error && error.message ? error.message : error) + '. Try Chrome or Edge.');
+      progressBar.style.width = '0%';
+      try { if (output && output.cancel) await output.cancel(); } catch (e) { /* ignore */ }
+      try { if (writable && writable.abort) await writable.abort(); } catch (e) { /* ignore */ }
+    } finally {
+      useSurface(previewCanvas);
+      finishUI();
+      paintIdle();
     }
-  );
+  });
 
 })();
