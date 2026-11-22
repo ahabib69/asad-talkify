@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Asad's Songify</title>
 <link rel="icon" href="favicon.svg">
+<script src="https://cdn.jsdelivr.net/npm/mp4-muxer@5"></script>
 <style>
 *{box-sizing:border-box}
 body{margin:0;min-height:100vh;font-family:system-ui,"Segoe UI",Arial,sans-serif;color:#fff;
@@ -126,6 +127,7 @@ au.onended=()=>{$('#play').textContent='▶';if(exporting)setTimeout(()=>rec&&re
 $('#exp').onclick=async()=>{
   if(exporting){cancelled=true;au.pause();if(rec&&rec.state!=='inactive')rec.stop();return;}
   if(!hasAudio){msg('Age ekta MP3 choose koro.');return;}
+  if(window.VideoEncoder&&window.AudioEncoder&&window.Mp4Muxer&&await fastExport())return;
   const pm=pickMime();if(!pm.mime){msg('Ei browser MediaRecorder support kore na. Chrome/Edge use koro.');return;}
   MIME=pm.mime;EXT=pm.ext;initAudio();await ac.resume();
   au.pause();au.currentTime=0;cancelled=false;chunks=[];
@@ -138,10 +140,63 @@ $('#exp').onclick=async()=>{
     setTimeout(()=>URL.revokeObjectURL(url),60000);$('#pg').style.width='100%';msg('Done ✅ Video download hoyeche.');};
   exporting=true;$('#exp').classList.add('stop');label();rec.start(1000);await au.play();$('#play').textContent='❚❚';msg('Exporting… real-time e hoy, tab khola rakho.');};
 
+/* ---------- FAST export (offline, real-time er cheye onek druto) ---------- */
+let fastBusy=false;
+function fft(re,im){const n=re.length;
+  for(let i=1,j=0;i<n;i++){let b=n>>1;for(;j&b;b>>=1)j^=b;j^=b;if(i<j){let t=re[i];re[i]=re[j];re[j]=t;t=im[i];im[i]=im[j];im[j]=t;}}
+  for(let len=2;len<=n;len<<=1){const ang=-2*Math.PI/len,wr=Math.cos(ang),wi=Math.sin(ang);
+    for(let i=0;i<n;i+=len){let cr=1,ci=0;for(let k=0;k<len/2;k++){const a=i+k,b=i+k+len/2,xr=re[b]*cr-im[b]*ci,xi=re[b]*ci+im[b]*cr;
+      re[b]=re[a]-xr;im[b]=im[a]-xi;re[a]+=xr;im[a]+=xi;const nr=cr*wr-ci*wi;ci=cr*wi+ci*wr;cr=nr;}}}}
+async function fastExport(){
+  const cfg={codec:'avc1.640028',width:W,height:H,bitrate:st.q>=1080?10e6:6e6,framerate:30};
+  try{const s=await VideoEncoder.isConfigSupported(cfg);if(!s.supported)return false;}catch(e){return false;}
+  exporting=true;fastBusy=true;cancelled=false;$('#exp').classList.add('stop');label();au.pause();$('#play').textContent='▶';
+  const tick=()=>new Promise(r=>setTimeout(r,0));
+  let ve,ae;
+  try{
+    msg('Audio decode hocche…');await tick();
+    const ac2=new (window.AudioContext||window.webkitAudioContext)();
+    const ab=await ac2.decodeAudioData(await (await fetch(au.src)).arrayBuffer());ac2.close();
+    const sr=ab.sampleRate,len=ab.length,FPS=30,total=Math.ceil(ab.duration*FPS);
+    const c0=ab.getChannelData(0),c1=ab.numberOfChannels>1?ab.getChannelData(1):c0;
+    const mono=new Float32Array(len);for(let i=0;i<len;i++)mono[i]=(c0[i]+c1[i])*.5;
+    const hann=new Float32Array(1024),re=new Float32Array(1024),im=new Float32Array(1024),sm=new Float32Array(512);
+    for(let i=0;i<1024;i++)hann[i]=.5-.5*Math.cos(2*Math.PI*i/1023);
+    const target=new Mp4Muxer.ArrayBufferTarget();
+    const muxer=new Mp4Muxer.Muxer({target,video:{codec:'avc',width:W,height:H},audio:{codec:'aac',numberOfChannels:2,sampleRate:sr},fastStart:'in-memory'});
+    let err=null;
+    ve=new VideoEncoder({output:(c,m)=>muxer.addVideoChunk(c,m),error:e=>err=e});ve.configure(cfg);
+    ae=new AudioEncoder({output:(c,m)=>muxer.addAudioChunk(c,m),error:e=>err=e});
+    ae.configure({codec:'mp4a.40.2',sampleRate:sr,numberOfChannels:2,bitrate:192000});
+    let ap=0;
+    for(let i=0;i<total&&!cancelled&&!err;i++){
+      const t=i/FPS,pos=Math.max(0,Math.min(len-1024,Math.floor(t*sr)-512));
+      for(let k=0;k<1024;k++){const s=mono[pos+k]||0;re[k]=s*hann[k];im[k]=0;td[k]=Math.max(0,Math.min(255,128+s*128));}
+      fft(re,im);
+      for(let k=0;k<512;k++){sm[k]=.7*sm[k]+.3*Math.hypot(re[k],im[k])/1024;freq[k]=Math.max(0,Math.min(255,(20*Math.log10(sm[k]+1e-9)+100)/70*255));}
+      analyse(t,true);draw(t);
+      const vf=new VideoFrame(cv,{timestamp:Math.round(i*1e6/FPS),duration:Math.round(1e6/FPS)});
+      ve.encode(vf,{keyFrame:i%60===0});vf.close();
+      const end=Math.min(len,Math.floor((i+1)*sr/FPS));
+      if(end>ap){const n=end-ap,d=new Float32Array(n*2);d.set(c0.subarray(ap,end),0);d.set(c1.subarray(ap,end),n);
+        const ad=new AudioData({format:'f32-planar',sampleRate:sr,numberOfFrames:n,numberOfChannels:2,timestamp:Math.round(ap/sr*1e6),data:d});ae.encode(ad);ad.close();ap=end;}
+      while(ve.encodeQueueSize>6)await tick();
+      if(i%4===0){const p=i/total*100;$('#pg').style.width=p+'%';msg('Fast export '+(p|0)+'% — tab khola rakho');await tick();}
+    }
+    if(err)throw err;
+    if(cancelled){try{ve.close();ae.close();}catch(e){}msg('Export cancel hoyeche.');$('#pg').style.width='0';}
+    else{msg('Finalizing…');await ve.flush();await ae.flush();muxer.finalize();
+      const url=URL.createObjectURL(new Blob([target.buffer],{type:'video/mp4'}));const a=document.createElement('a');a.href=url;a.download='songify-'+st.q+'p.mp4';
+      document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);$('#pg').style.width='100%';msg('Done ✅ MP4 download hoyeche.');}
+  }catch(e){console.error(e);msg('Fast export fail: '+(e.message||e));$('#pg').style.width='0';}
+  exporting=false;fastBusy=false;$('#exp').classList.remove('stop');label();
+  return true;
+}
+
 /* ---------- analysis ---------- */
-function analyse(t){
-  const playing=ac&&!au.paused;
-  if(playing){an.getByteFrequencyData(freq);an.getByteTimeDomainData(td);}
+function analyse(t,force){
+  const playing=force||(ac&&!au.paused);
+  if(playing&&!force){an.getByteFrequencyData(freq);an.getByteTimeDomainData(td);}
   else for(let i=0;i<1024;i+=2)td[i]=128+Math.sin(i*.03+t*3)*16;
   for(let i=0;i<N;i++){let v;
     if(playing){const lo=Math.floor(Math.pow(i/N,2)*380)+1,hi=Math.max(lo+1,Math.floor(Math.pow((i+1)/N,2)*380)+1);let s=0;for(let j=lo;j<hi;j++)s+=freq[j];
@@ -205,7 +260,7 @@ function draw(t){const c=ctx,s=1+bass*.035;c.setTransform(1,0,0,1,0,0);c.globalA
 
 /* ---------- loop (export e 30fps cap = PC hang hoy na) ---------- */
 let last=0;
-function loop(now){requestAnimationFrame(loop);if(now-last<(exporting?30:15))return;last=now;analyse(now/1000);draw(now/1000);}
+function loop(now){requestAnimationFrame(loop);if(fastBusy)return;if(now-last<(exporting?30:15))return;last=now;analyse(now/1000);draw(now/1000);}
 
 size();mark();label();requestAnimationFrame(loop);
 })();
